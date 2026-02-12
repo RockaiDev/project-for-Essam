@@ -4,6 +4,7 @@ import pandas as pd
 import json
 import os
 import io
+import zipfile
 
 from generate_invoices import create_invoice_pdf, extract_metadata
 
@@ -127,6 +128,27 @@ if page == "Dashboard":
     if not db:
         st.info("No invoices found. Go to 'Upload New Data' to add some.")
     else:
+        # Download All Button
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("📥 Download All Invoices", type="primary"):
+                # Create ZIP file in memory
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    for inv in db:
+                        pdf_path = inv.get('pdf_path')
+                        if pdf_path and os.path.exists(pdf_path):
+                            # Add file to ZIP with its basename
+                            zip_file.write(pdf_path, os.path.basename(pdf_path))
+                
+                zip_buffer.seek(0)
+                st.download_button(
+                    label="Click to Download ZIP",
+                    data=zip_buffer,
+                    file_name="all_invoices.zip",
+                    mime="application/zip"
+                )
+        
         # Create DataFrame for display
         display_data = []
         for inv in db:

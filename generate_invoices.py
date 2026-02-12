@@ -103,8 +103,8 @@ def extract_metadata(df, stop_row_idx):
                     if key.lower() in cell_val.lower():
                         # Found key at k_idx. Look for value in next few cells.
                         # Usually value is immediate next non-empty, or at specific offset.
-                        # Let's look at k_idx + 1 up to k_idx + 5
-                        for offset in range(1, 6):
+                        # Values can be far (e.g. Contract at 24, Value at 32 -> gap 8)
+                        for offset in range(1, 20):
                             if k_idx + offset < len(search_row_vals):
                                 candidate = search_row_vals[k_idx + offset]
                                 if candidate and candidate.lower() != 'nan' and candidate.strip() != '' and candidate.strip() != '-':
@@ -165,6 +165,16 @@ def extract_metadata(df, stop_row_idx):
              val = find_val(['vat no', 'tax id', 'registration no', 'التسجيل الضريبي'], row_vals)
              if val: metadata['VAT No'] = val
 
+        # Contract
+        if 'Contract' not in metadata:
+             val = find_val(['contract', 'العقد'], row_vals)
+             if val: metadata['Contract'] = val
+             
+        # Department
+        if 'Department' not in metadata:
+             val = find_val(['department', 'dept', 'specialty', 'القسم', 'التخصص'], row_vals)
+             if val: metadata['Department'] = val
+
     # Hardcoded fixes for known problematic layouts if dynamic fails
     # Based on Audit:
     # Row 17: Invoice (Col 5) -> Val (Col 9)
@@ -185,14 +195,31 @@ def create_invoice_pdf(df, sheet_name, output_path):
     
     # 5.1 Locate Table Header & Extract Metadata
     header_row_idx = None
-    header_map = {}
+    # We will store indices for specific headers, handling duplicates
+    cols = {
+        'Description': None, 'Qty': None, 'Unit': None, 'Date': None, 
+        'Total': None, 'Discount': None,
+        'Debit': [], 'Credit': []
+    }
+    
     for i, row in df.iterrows():
         vals = [str(x).lower().strip() for x in row.values if pd.notna(x)]
         if 'description' in vals and ('qty' in vals or 'unit' in vals):
             header_row_idx = i
+            # Precise Mapping
             for col_idx, val in enumerate(row):
                 if pd.notna(val):
-                    header_map[str(val).strip()] = col_idx
+                    v_str = str(val).strip()
+                    v_lower = v_str.lower()
+                    
+                    if 'description' in v_lower: cols['Description'] = col_idx
+                    elif 'qty' in v_lower: cols['Qty'] = col_idx
+                    elif 'unit' in v_lower: cols['Unit'] = col_idx
+                    elif 'date' in v_lower and 'admission' not in v_lower: cols['Date'] = col_idx # Avoid Admission Date in header? No, usually just 'Date'
+                    elif 'total' in v_lower and 'grand' not in v_lower: cols['Total'] = col_idx 
+                    elif 'discount' in v_lower: cols['Discount'] = col_idx
+                    elif 'debit' in v_lower: cols['Debit'].append(col_idx)
+                    elif 'credit' in v_lower: cols['Credit'].append(col_idx)
             break
             
     if header_row_idx is None:
@@ -202,15 +229,23 @@ def create_invoice_pdf(df, sheet_name, output_path):
     metadata = extract_metadata(df, header_row_idx)
     inv_no = metadata.get('Invoice No', '-')
     
+    # Identify Patient vs Insurer Columns
+    # Assumption: First Pair is Patient, Second is Insurer (based on standard layouts and user image)
+    col_p_debit = cols['Debit'][0] if len(cols['Debit']) > 0 else None
+    col_p_credit = cols['Credit'][0] if len(cols['Credit']) > 0 else None
+    col_i_debit = cols['Debit'][1] if len(cols['Debit']) > 1 else None
+    col_i_credit = cols['Credit'][1] if len(cols['Credit']) > 1 else None
+
     # --- UI CONSTANTS ---
-    RED_COLOR = colors.HexColor('#A6192E') # Andalusia Red approx
+    # ... (Same as before)
+    RED_COLOR = colors.HexColor('#A6192E')
     GRAY_BG = colors.HexColor('#E0E0E0')
     DARK_GRAY_BG = colors.HexColor('#B0B0B0')
     BORDER_COLOR = colors.black
     
-    # --- HEADER SECTION ---
-    # Layout: [Left Text] [Center Logo] [Right Text]
+    # ... (Meta data extraction same as before) ...
     
+    # --- HEADER SECTION ---
     # Styles
     h_style = ParagraphStyle('H', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10)
     addr_style = ParagraphStyle('A', parent=styles['Normal'], fontName=FONT_NAME, fontSize=9, alignment=2) # Right align
@@ -248,8 +283,6 @@ def create_invoice_pdf(df, sheet_name, output_path):
     elements.append(title_para)
     
     # --- METADATA GRID ---
-    # Columns: [Eng Label (2.5cm), Value (4cm), Arb Label (2.5cm)] x 2 (Left/Right sides)
-    
     label_style = ParagraphStyle('L', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=8)
     val_style = ParagraphStyle('V', parent=styles['Normal'], fontName=FONT_NAME, fontSize=8)
     arb_label_style = ParagraphStyle('AL', parent=styles['Normal'], fontName=FONT_NAME, fontSize=8, alignment=2)
@@ -259,32 +292,25 @@ def create_invoice_pdf(df, sheet_name, output_path):
         v2 = process_text(metadata.get(val2_key, '-'))
         return [
             Paragraph(eng1, label_style), Paragraph(v1, val_style), Paragraph(process_text(arb1), arb_label_style),
-            "", # Spacer col
+            "", 
             Paragraph(eng2, label_style), Paragraph(v2, val_style), Paragraph(process_text(arb2), arb_label_style)
         ]
         
     meta_data = [
-        # Headers logic handled by wrapper table borders
         meta_row("Invoice", "Invoice No", "رقم الفاتورة", "Visit", "Visit No", "رقم الزيارة"),
         meta_row("Date of Admission", "Admission Date", "تاريخ الدخول", "Date of Discharge", "Discharge Date", "تاريخ الخروج"),
-        meta_row("Patient Name", "Patient Name", "اسم المريض", "File No", "File No", "رقم ملف المريض"), # File No repeated? In image, Arabic Name is separate.
-        # Image shows: Patient Name (Eng) | File No. (Eng) || Patient Name (Arb) | File No (Arb Label)
-        # We will simplify to fit our data:
+        meta_row("Patient Name", "Patient Name", "اسم المريض", "File No", "File No", "رقم ملف المريض"),
         meta_row("Insurance Card", "Insurer Card", "-", "Nationality", "Nationality", "الجنسية"),
         meta_row("Insurer", "Insurer", "المؤمن", "Contract", "Contract", "العقد"),
         meta_row("Physician", "Physician", "الطبيب المعالج", "Department", "Department", "القسم"),
         meta_row("Room No.", "Room No", "رقم الغرفة", "", "", "")
     ]
     
-    # Need column widths that sum to ~19.5cm
-    # Col 1 (2.5), Col 2 (5.0), Col 3 (2.0) | Gap (0.5) | Col 4 (2.5), Col 5 (5.0), Col 6 (2.0)
-    col_widths = [2.5*cm, 5.0*cm, 2.0*cm, 0.5*cm, 2.5*cm, 5.0*cm, 2.0*cm]
-    
-    t_meta = Table(meta_data, colWidths=col_widths)
+    t_meta = Table(meta_data, colWidths=[2.5*cm, 5.0*cm, 2.0*cm, 0.5*cm, 2.5*cm, 5.0*cm, 2.0*cm])
     t_meta.setStyle(TableStyle([
-        ('BOX', (0,0), (-1,-1), 1, BORDER_COLOR), # Outer Box
+        ('BOX', (0,0), (-1,-1), 1, BORDER_COLOR), 
         ('VALIGN', (0,0), (-1,-1), 'TOP'),
-        ('FONTNAME', (0,0), (-1,-1), FONT_NAME),
+        ('FONTNAME', (0,0), (-1,-1), FONT_NAME), 
         ('BOTTOMPADDING', (0,0), (-1,-1), 2),
         ('TOPPADDING', (0,0), (-1,-1), 2),
     ]))
@@ -292,36 +318,21 @@ def create_invoice_pdf(df, sheet_name, output_path):
     elements.append(Spacer(1, 0.5*cm))
     
     # --- ITEMS TABLE ---
-    # Header Structure matches image
-    # Row 1: Spacer | Spacer | Spacer | Spacer | Spacer | Spacer | Patient (2 cols) | Insurer (2 cols)
-    # Row 2: Description | Qty | Unit | Date | Total | Discount | Debit | Credit | Debit | Credit
-    
-    # Our data assumes mostly Patient Debit (Net). We will put 'Net' in 'Patient Debit' and 0 in others for now.
-    
-    # Define Column Widths
-    # Desc(6), Qty(1.2), Unit(1.2), Date(2), Total(2), Disc(1.5), P.Deb(1.5), P.Cred(1.5), I.Deb(1.5), I.Cred(1.5) -> Total ~19.9cm
     item_col_widths = [5.5*cm, 1.2*cm, 1.2*cm, 2.2*cm, 2.0*cm, 1.5*cm, 1.5*cm, 1.5*cm, 1.5*cm, 1.5*cm]
-    
-    # Styles
     th_style = ParagraphStyle('TH', fontName='Helvetica-Bold', fontSize=8, alignment=1)
-    td_style = ParagraphStyle('TD', fontName=FONT_NAME, fontSize=8, alignment=1) # Center align for numbers
+    td_style = ParagraphStyle('TD', fontName=FONT_NAME, fontSize=8, alignment=1) # Center align
     td_desc_style = ParagraphStyle('TDD', fontName=FONT_NAME, fontSize=8, alignment=0) # Left align desc
     
     def p_th(txt): return Paragraph(txt, th_style)
     def p_td(txt, s=td_style): return Paragraph(str(txt), s)
 
-    # 1. Super Header
-    # We construct the whole table data list first
     table_data = []
-    
     # Row 0: Super Headers
-    # We will use spans for Patient and Insurer
     table_data.append([
         "", "", "", "", "", "", 
         p_th("Patient"), "", # Spans next
         p_th("Insurer"), ""  # Spans next
     ])
-    
     # Row 1: Main Headers
     table_data.append([
         p_th("Description"), p_th("Qty"), p_th("Unit"), p_th("Date"),
@@ -330,16 +341,8 @@ def create_invoice_pdf(df, sheet_name, output_path):
         p_th("Debit"), p_th("Credit")
     ])
     
-    # Data Rows
-    col_desc = header_map.get('Description')
-    col_qty = header_map.get('Qty')
-    col_total = header_map.get('Total') # Or Unit Price
-    col_disc = header_map.get('Discount')
-    col_net = header_map.get('Debit') # Or Net Amount
-    col_date = header_map.get('Date')
-    col_unit = header_map.get('Unit') # Try to map if exists
-    
-    grand_total = 0.0
+    grand_total_p = 0.0 # Patient Debit Total
+    grand_total_i = 0.0 # Insurer Debit Total
     subtotal_rows = []
     
     for i in range(header_row_idx + 1, len(df)):
@@ -349,35 +352,62 @@ def create_invoice_pdf(df, sheet_name, output_path):
              v = row.iloc[c] if c is not None and pd.notna(row.iloc[c]) else ""
              return v
              
-        desc_raw = str(get_v(col_desc)).strip()
-        date_val = str(get_v(col_date)).strip()
+        desc_raw = str(get_v(cols['Description'])).strip()
+        date_val = str(get_v(cols['Date'])).strip()
+        
+        # Values
+        qty = get_v(cols['Qty'])
+        unit = get_v(cols['Unit'])
+        total = get_v(cols['Total']) # Unit Price
+        disc = get_v(cols['Discount'])
+        p_debit = get_v(col_p_debit)
+        p_credit = get_v(col_p_credit)
+        i_debit = get_v(col_i_debit)
+        i_credit = get_v(col_i_credit)
         
         # Stop at Grand Total
         if 'Grand Total' in desc_raw or 'Grand Total' in date_val:
-            try:
-                grand_total = float(str(get_v(col_net)).replace(',',''))
-            except:
-                grand_total = 0.0
+            # The Grand Total row usually has:
+            # - The overall total in the "Total" column (Col 22)
+            # - Individual Patient/Insurer portions in Debit columns
+            # We want the overall total from the "Total" column
+            overall_total = get_v(cols['Total'])
+            try: 
+                grand_total_p = float(str(overall_total).replace(',',''))
+            except: 
+                grand_total_p = 0.0
+            
+            # Also capture the breakdown
+            try: 
+                patient_portion = float(str(p_debit).replace(',',''))
+            except: 
+                patient_portion = 0.0
+            
+            try: 
+                insurer_portion = float(str(i_debit).replace(',',''))
+            except: 
+                insurer_portion = 0.0
+                
+            # If Total column is empty, sum the portions
+            if grand_total_p == 0.0:
+                grand_total_p = patient_portion + insurer_portion
+                
+            grand_total_i = insurer_portion
             break
             
-        if not desc_raw and not get_v(col_qty) and not get_v(col_net): continue
+        if not desc_raw and not qty and not p_debit and not i_debit: continue
         
-        # Formatting
-        qty = get_v(col_qty)
-        qty_str = f"{qty:.3f}" if isinstance(qty, float) else str(qty)
+        # Formatting 
+        def fmt(x): return f"{x:.3f}" if isinstance(x, (int, float)) else str(x)
         
-        price = get_v(col_total)
-        price_str = f"{price:.3f}" if isinstance(price, (int,float)) else str(price)
+        qty_str = fmt(qty)
+        price_str = fmt(total)
+        disc_str = fmt(disc)
+        pd_str = fmt(p_debit)
+        pc_str = fmt(p_credit)
+        id_str = fmt(i_debit)
+        ic_str = fmt(i_credit)
         
-        disc = get_v(col_disc)
-        disc_str = f"{disc:.3f}" if isinstance(disc, (int,float)) else str(disc)
-        
-        net = get_v(col_net)
-        net_str = f"{net:.3f}" if isinstance(net, (int,float)) else str(net)
-        
-        unit = get_v(col_unit) # Likely empty/Each
-        
-        # Identify Row Type
         is_subtotal = 'total' in desc_raw.lower()
         is_header = (desc_raw and qty == "")
         
@@ -387,25 +417,23 @@ def create_invoice_pdf(df, sheet_name, output_path):
                 Paragraph(f"<b>{process_text(desc_raw)}</b>", td_desc_style),
                 "", "", "", 
                 Paragraph(f"<b>{price_str}</b>", td_style),
-                "", "", "", "", "" # Just showing total price ideally, or net
+                "", 
+                Paragraph(f"<b>{pd_str}</b>", td_style),
+                Paragraph(f"<b>{pc_str}</b>", td_style),
+                Paragraph(f"<b>{id_str}</b>", td_style),
+                Paragraph(f"<b>{ic_str}</b>", td_style),
             ]
-            # If net is available, put it in Patient Debit column?
-            if net: row_items[6] = Paragraph(f"<b>{net_str}</b>", td_style)
-            
             subtotal_rows.append(len(table_data))
             table_data.append(row_items)
             
         elif is_header:
-            # Category Header (e.g. Medical Services)
-            # Gray background, bold text
             table_data.append([
                 Paragraph(f"<b>{process_text(desc_raw)}</b>", td_desc_style),
                 "", "", "", "", "", "", "", "", ""
             ])
-            subtotal_rows.append(len(table_data)-1) # Reuse subtotal style for gray bg
+            subtotal_rows.append(len(table_data)-1)
             
         else:
-            # Standard Item
             table_data.append([
                 Paragraph(process_text(desc_raw), td_desc_style),
                 p_td(qty_str),
@@ -413,22 +441,25 @@ def create_invoice_pdf(df, sheet_name, output_path):
                 p_td(date_val),
                 p_td(price_str),
                 p_td(disc_str),
-                p_td(net_str), # Patient Debit
-                p_td("0.000"), # Patient Credit
-                p_td(""),      # Insurer Debit
-                p_td("")       # Insurer Credit (Assumed)
+                p_td(pd_str), # Patient Debit
+                p_td(pc_str), # Patient Credit
+                p_td(id_str), # Insurer Debit
+                p_td(ic_str)  # Insurer Credit
             ])
 
     # Grand Total Row
-    gt_str = f"{grand_total:,.3f}"
+    gt_p_str = f"{grand_total_p:,.3f}"
+    gt_i_str = f"{grand_total_i:,.3f}"
+    
     table_data.append([
         Paragraph("<b>Grand Total</b>", ParagraphStyle('GT', alignment=2, fontName='Helvetica-Bold', fontSize=9)),
-        "", "", "", "",
-        Paragraph(f"<b>{gt_str}</b>", td_style), # Discount column? No, match headers
-        Paragraph(f"<b>{gt_str}</b>", td_style), # Debit column
-        "", "", ""
+        "", "", "", "", "",
+        Paragraph(f"<b>{gt_p_str}</b>", td_style), # Patient Debit
+        Paragraph("<b>0.000</b>", td_style),       # Patient Credit
+        Paragraph(f"<b>{gt_i_str}</b>", td_style), # Insurer Debit
+        Paragraph("<b>0.000</b>", td_style)        # Insurer Credit
     ])
-    
+
     # Build Items Table
     t_items = Table(table_data, colWidths=item_col_widths, repeatRows=2)
     
@@ -447,7 +478,7 @@ def create_invoice_pdf(df, sheet_name, output_path):
         ('ALIGN', (0,0), (-1,1), 'CENTER'),
         
         # Grand Total Styling (Last Row)
-        ('SPAN', (0,-1), (4,-1)), # Label spans first 5 cols
+        ('SPAN', (0,-1), (5,-1)), # Label spans first 6 cols (Desc to Discount)
         ('BACKGROUND', (0,-1), (-1,-1), DARK_GRAY_BG),
     ]
     
@@ -457,6 +488,31 @@ def create_invoice_pdf(df, sheet_name, output_path):
         
     t_items.setStyle(TableStyle(item_tbl_style))
     elements.append(t_items)
+    elements.append(Spacer(1, 0.5*cm))
+    
+    # --- Grand Total Box --- 
+    total_val_str = f"{grand_total_p:,.2f} EGP"
+    
+    total_box_data = [
+        [Paragraph("Grand Total", ParagraphStyle('GT_L', fontSize=12, textColor=colors.white, alignment=2)),
+         Paragraph(total_val_str, ParagraphStyle('GT_V', fontSize=14, fontName='Helvetica-Bold', textColor=colors.white, alignment=2))]
+    ]
+    
+    t_total_box = Table(total_box_data, colWidths=[4*cm, 5*cm])
+    t_total_box.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), PRIMARY_COLOR),
+        ('TOPPADDING', (0,0), (-1,-1), 8),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+        ('RIGHTPADDING', (0,0), (-1,-1), 12),
+        ('LEFTPADDING', (0,0), (-1,-1), 12),
+    ]))
+    
+    # Place total box to the right
+    t_footer_layout = Table([[None, t_total_box]], colWidths=[9*cm, 10*cm])
+    t_footer_layout.setStyle(TableStyle([
+        ('ALIGN', (1,0), (-1,-1), 'RIGHT'),
+    ]))
+    elements.append(t_footer_layout)
     
     # Footer
     elements.append(Spacer(1, 1.0*cm))
