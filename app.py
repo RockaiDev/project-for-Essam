@@ -116,7 +116,7 @@ st.markdown("""
 
 # Sidebar with better navigation
 st.sidebar.title("Navigation")
-page = st.sidebar.radio("", ["Dashboard", "Upload New Data", "Settings"], label_visibility="collapsed")
+page = st.sidebar.radio("Select Page", ["Dashboard", "Upload New Data", "Settings"], label_visibility="collapsed")
 st.sidebar.divider()
 st.sidebar.markdown("© 2026 Rockai Dev")
 st.sidebar.markdown("Powered by *Advanced Agentic AI*")
@@ -163,7 +163,7 @@ if page == "Dashboard":
             })
             
         df_display = pd.DataFrame(display_data)
-        st.dataframe(df_display, use_container_width=True)
+        st.dataframe(df_display, width='stretch')
         
         # Detail View
         st.divider()
